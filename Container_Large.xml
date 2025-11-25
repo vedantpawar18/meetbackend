@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Container>
+    <Parcel>
+        <TrackingId>PCL-001</TrackingId>
+        <Weight>0.8</Weight>
+        <Value>50</Value>
+        <Destination>Berlin</Destination>
+    </Parcel>
+
+    <Parcel>
+        <TrackingId>PCL-002</TrackingId>
+        <Weight>12.5</Weight>
+        <Value>350</Value>
+        <Destination>Munich</Destination>
+    </Parcel>
+</Container>
