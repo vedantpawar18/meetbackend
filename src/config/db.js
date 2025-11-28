@@ -5,11 +5,12 @@ const DB_URI =
 
 async function connectDB() {
   try {
-    // If already connected, do nothing
-    if (mongoose.connection.readyState === 1) return;
+    if (mongoose.connection.readyState === 1) {
+      return;
+    }
 
     await mongoose.connect(DB_URI);
-    console.log("MongoDB connected");
+    console.log("MongoDB connected successfully!");
   } catch (err) {
     console.error("MongoDB connection error:", err);
     process.exit(1);
