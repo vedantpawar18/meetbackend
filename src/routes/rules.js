@@ -1,119 +1,188 @@
-const express = require('express');
-const auth = require('../middleware/auth');
-const Rule = require('../models/Rule');
-const Department = require('../models/Department');
-const Parcel = require('../models/Parcel');
-const mongoose = require('mongoose');
-const { evaluateRulesForParcel } = require('../utils/rulesEngine');
+const express = require("express");
+const auth = require("../middleware/auth");
+const Rule = require("../models/Rule");
+const Parcel = require("../models/Parcel");
+const { evaluateRulesForParcel } = require("../utils/rulesEngine");
+const { resolveDepartmentId } = require("../utils/departmentUtils");
 
 const router = express.Router();
 
-router.get('/', auth, async (req, res) => {
-  const all = await Rule.find().sort('priority');
-  res.json(all);
-});
-
-// helper: resolve department identifier (id or name) to ObjectId string
-async function resolveDepartmentId(val) {
-  if (!val && val !== 0) return null;
-  const s = String(val).trim();
-  if (!s) return null;
-  if (mongoose.Types.ObjectId.isValid(s)) {
-    const f = await Department.findById(s).lean();
-    return f ? String(f._id) : null;
+router.get("/", auth, async (req, res) => {
+  try {
+    const rules = await Rule.find().sort("priority");
+    res.json(rules);
+  } catch (err) {
+    console.error("Error fetching rules:", err);
+    res.status(500).json({ message: "Server error" });
   }
-  const byName = await Department.findOne({ name: new RegExp(`^${s}$`, 'i') }).lean();
-  return byName ? String(byName._id) : null;
-}
+});
 
 async function normalizeBuckets(buckets) {
-  if (!Array.isArray(buckets)) return [];
-  const out = [];
-  for (const b of buckets) {
-    const deptVal = b.departmentId || b.department || b.deptId || b.dept || b.name;
-    const deptId = await resolveDepartmentId(deptVal);
-    if (!deptId) throw new Error(`Unknown department for bucket: ${deptVal}`);
-    const max = (b.maxKg === '' || b.maxKg === null || b.maxKg === undefined) ? null : Number(b.maxKg);
-    out.push({ departmentId: deptId, maxKg: Number.isFinite(max) ? max : null });
+  if (!Array.isArray(buckets)) {
+    return [];
   }
-  return out;
-}
 
-router.post('/', auth, async (req, res) => {
-  if (req.user.role !== 'admin') return res.status(403).json({ message: 'Forbidden' });
-  try {
-    const body = { ...req.body };
-    console.log("body:", body);
-    if (body.type === 'weight' && body.config && Array.isArray(body.config.buckets)) {
-      body.config = { ...body.config };
-      body.config.buckets = await normalizeBuckets(body.config.buckets);
-    }
-    const rule = await Rule.create(body);
-    res.status(201).json(rule);
-  } catch (err) {
-    console.error('Create rule error:', err);
-    res.status(400).json({ message: err.message });
-  }
-});
+  const normalizedBuckets = [];
 
-router.put('/:id', auth, async (req, res) => {
-  if (req.user.role !== 'admin') return res.status(403).json({ message: 'Forbidden' });
-  try {
-    const body = { ...req.body };
-    console.log("body:", body.config.buckets);
-    if (body.type === 'weight' && body.config && Array.isArray(body.config.buckets)) {
-      body.config = { ...body.config };
-      body.config.buckets = await normalizeBuckets(body.config.buckets);
+  for (const bucket of buckets) {
+    const deptValue =
+      bucket.departmentId ||
+      bucket.department ||
+      bucket.deptId ||
+      bucket.dept ||
+      bucket.name;
+
+    const deptId = await resolveDepartmentId(deptValue);
+
+    if (!deptId) {
+      throw new Error(`Department not found: ${deptValue}`);
     }
-    const rule = await Rule.findByIdAndUpdate(req.params.id, body, { new: true });
-    
-    // If this is a weight rule, re-evaluate all parcels that don't require insurance
-    if (body.type === 'weight') {
-      try {
-        // Find all parcels that are NOT awaiting insurance (either 'not_required' or 'approved')
-        const parcelsToUpdate = await Parcel.find({
-          'insuranceApproval.status': { $ne: 'pending' }
-        });
-        
-        // Load all rules to pass to evaluateRulesForParcel
-        const allRules = await Rule.find().lean();
-        
-        // Re-evaluate each parcel and update assignedDepartment
-        for (const parcel of parcelsToUpdate) {
-          try {
-            const evalRes = await evaluateRulesForParcel(
-              { weightKg: parcel.weightKg, valueEur: parcel.valueEur },
-              allRules
-            );
-            
-            // Update parcel with new department (if rule evaluation found one)
-            if (evalRes.assignedDepartment) {
-              parcel.assignedDepartment = evalRes.assignedDepartment;
-            }
-            await parcel.save();
-          } catch (e) {
-            console.error(`Failed to re-evaluate parcel ${parcel._id}:`, e);
-            // Continue with next parcel even if one fails
-          }
-        }
-        console.log(`Re-evaluated and updated ${parcelsToUpdate.length} parcels after rule update`);
-      } catch (e) {
-        console.error('Error re-evaluating parcels after rule update:', e);
-        // Don't fail the rule update itself if parcel re-evaluation fails
+
+    let maxKg = null;
+    if (
+      bucket.maxKg !== "" &&
+      bucket.maxKg !== null &&
+      bucket.maxKg !== undefined
+    ) {
+      maxKg = Number(bucket.maxKg);
+      if (!Number.isFinite(maxKg)) {
+        maxKg = null;
       }
     }
-    
-    res.json(rule);
+
+    normalizedBuckets.push({
+      departmentId: deptId,
+      maxKg: maxKg,
+    });
+  }
+
+  return normalizedBuckets;
+}
+
+router.post("/", auth, async (req, res) => {
+  try {
+    if (req.user.role !== "admin") {
+      return res.status(403).json({ message: "Only admins can create rules" });
+    }
+
+    const ruleData = { ...req.body };
+
+    if (
+      ruleData.type === "weight" &&
+      ruleData.config &&
+      Array.isArray(ruleData.config.buckets)
+    ) {
+      ruleData.config = {
+        ...ruleData.config,
+        buckets: await normalizeBuckets(ruleData.config.buckets),
+      };
+    }
+
+    const rule = await Rule.create(ruleData);
+
+    res.status(201).json(rule);
   } catch (err) {
-    console.error('Update rule error:', err);
+    console.error("Error creating rule:", err);
     res.status(400).json({ message: err.message });
   }
 });
 
-router.delete('/:id', auth, async (req, res) => {
-  if (req.user.role !== 'admin') return res.status(403).json({ message: 'Forbidden' });
-  await Rule.findByIdAndDelete(req.params.id);
-  res.json({ ok: true });
+router.put("/:id", auth, async (req, res) => {
+  try {
+    if (req.user.role !== "admin") {
+      return res.status(403).json({ message: "Only admins can update rules" });
+    }
+
+    const ruleId = req.params.id;
+
+    const ruleData = { ...req.body };
+
+    if (
+      ruleData.type === "weight" &&
+      ruleData.config &&
+      Array.isArray(ruleData.config.buckets)
+    ) {
+      ruleData.config = {
+        ...ruleData.config,
+        buckets: await normalizeBuckets(ruleData.config.buckets),
+      };
+    }
+
+    const updatedRule = await Rule.findByIdAndUpdate(ruleId, ruleData, {
+      new: true,
+    });
+
+    if (!updatedRule) {
+      return res.status(404).json({ message: "Rule not found" });
+    }
+
+    if (ruleData.type === "weight") {
+      try {
+        const parcelsToUpdate = await Parcel.find({
+          "insuranceApproval.status": { $ne: "pending" },
+        });
+
+        const allRules = await Rule.find().lean();
+
+        let updatedCount = 0;
+        for (const parcel of parcelsToUpdate) {
+          try {
+            const evaluationResult = await evaluateRulesForParcel(
+              {
+                weightKg: parcel.weightKg,
+                valueEur: parcel.valueEur,
+              },
+              allRules
+            );
+
+            if (evaluationResult.assignedDepartment) {
+              parcel.assignedDepartment = evaluationResult.assignedDepartment;
+              await parcel.save();
+              updatedCount++;
+            }
+          } catch (parcelError) {
+            console.error(
+              `Failed to re-evaluate parcel ${parcel._id}:`,
+              parcelError
+            );
+          }
+        }
+
+        console.log(`Re-evaluated ${updatedCount} parcels after rule update`);
+      } catch (reEvaluationError) {
+        console.error(
+          "Error re-evaluating parcels after rule update:",
+          reEvaluationError
+        );
+      }
+    }
+
+    res.json(updatedRule);
+  } catch (err) {
+    console.error("Error updating rule:", err);
+    res.status(400).json({ message: err.message });
+  }
+});
+
+router.delete("/:id", auth, async (req, res) => {
+  try {
+    if (req.user.role !== "admin") {
+      return res.status(403).json({ message: "Only admins can delete rules" });
+    }
+
+    const ruleId = req.params.id;
+
+    const deleted = await Rule.findByIdAndDelete(ruleId);
+
+    if (!deleted) {
+      return res.status(404).json({ message: "Rule not found" });
+    }
+
+    res.json({ ok: true, message: "Rule deleted successfully" });
+  } catch (err) {
+    console.error("Error deleting rule:", err);
+    res.status(500).json({ message: "Server error" });
+  }
 });
 
 module.exports = router;
